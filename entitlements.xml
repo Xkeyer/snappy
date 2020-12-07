@@ -1,14 +1,213 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>platform-application</key>
-	<true/>
-	<key>com.apple.private.apfs.revert-to-snapshot</key>
-	<true/>
-	<key>com.apple.private.security.disk-device-access</key>
-	<true/>
-	<key>com.apple.private.vfs.snapshot</key>
-	<true/>
-</dict>
-</plist>
+/*
+ * Copyright 2017 Adam H. Leventhal. All Rights Reserved.
+ */
+
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+
+#include <errno.h>
+#include <sys/attr.h>
+#include <sys/snapshot.h>
+
+
+#define HAVE_OP_ROOT !defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
+
+#if HAVE_OP_ROOT
+int fs_snapshot_root(int, const char *, uint32_t);
+#endif
+
+const char *g_pname;
+
+void usage(void) {
+	(void) fprintf(stderr, "Usage:\n");
+	(void) fprintf(stderr, "\t%s -l <vol>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -c <snap> <vol>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -n <snap> <newname> <vol>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -d <snap> <vol>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -r <snap> <vol>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -s <snap> <vol> <mntpnt>\n", g_pname);
+	(void) fprintf(stderr, "\t%s -u <snap> <vol>\n", g_pname);
+#if HAVE_OP_ROOT
+	(void) fprintf(stderr, "\t%s -R <snap> <vol> -- set rootfs to snapshot on next boot -- non-osx only\n", g_pname);
+#endif
+	exit(2);	
+}
+
+int do_create(const char *vol, const char *snap)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_create(dirfd, snap, 0);
+	if (ret != 0)
+		perror("fs_snapshot_create");
+	return (ret);
+}
+
+int do_delete(const char *vol, const char *snap)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_delete(dirfd, snap, 0);
+	if (ret != 0)
+		perror("fs_snapshot_delete");
+	return (ret);
+}
+
+int do_revert(const char *vol, const char *snap)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_revert(dirfd, snap, 0);
+	if (ret != 0)
+		perror("fs_snapshot_revert");
+	return (ret);
+}
+
+int do_rename(const char *vol, const char *snap, const char *nw)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_rename(dirfd, snap, nw, 0);
+	if (ret != 0)
+		perror("fs_snapshot_rename");
+	return (ret);
+}
+
+#if HAVE_OP_ROOT
+int do_root(const char *vol, const char *snap)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_root(dirfd, snap, 0);
+	if (ret != 0)
+		perror("fs_snapshot_root");
+	return (ret);
+}
+#endif
+
+int do_mount(const char *vol, const char *snap, const char *mntpnt)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	int ret = fs_snapshot_mount(dirfd, mntpnt, snap, 0);
+	if (ret != 0) {
+		perror("fs_snapshot_mount");
+	} else {
+		printf("mount_apfs: snapshot implicitly mounted readonly\n");
+	}
+	return (ret);
+}
+
+int do_list(const char *vol)
+{
+	int dirfd = open(vol, O_RDONLY, 0);
+	if (dirfd < 0) {
+		perror("open");
+		exit(1);
+	}
+
+	struct attrlist alist = { 0 };
+	char abuf[2048];
+
+	alist.commonattr = ATTR_BULK_REQUIRED;
+
+	int count = fs_snapshot_list(dirfd, &alist, &abuf[0], sizeof (abuf), 0);
+	if (count < 0) {
+		perror("fs_snapshot_list");
+		exit(1);
+	}
+
+	char *p = &abuf[0];
+	for (int i = 0; i < count; i++) {
+		char *field = p;
+		uint32_t len = *(uint32_t *)field;
+		field += sizeof (uint32_t);
+		attribute_set_t attrs = *(attribute_set_t *)field;
+		field += sizeof (attribute_set_t);
+
+		if (attrs.commonattr & ATTR_CMN_NAME) {
+			attrreference_t ar = *(attrreference_t *)field;
+			char *name = field + ar.attr_dataoffset;
+			field += sizeof (attrreference_t);
+			(void) printf("%s\n", name);
+		}
+
+		p += len;
+	}
+
+	return (0);
+}
+
+int main(int argc, char **argv)
+{
+	g_pname = strrchr(argv[0], '/') + 1;
+
+	if (argc < 3 || argv[1][0] != '-' ||
+	    argv[1][1] == '\0' || argv[1][2] != '\0') {
+		usage();
+	}
+
+	switch (argv[1][1]) {
+		case 'l':
+			if (argc != 3)
+				usage();
+			return (do_list(argv[2]));
+		case 'c':
+			if (argc != 4)
+				usage();
+			return (do_create(argv[3], argv[2]));
+		case 'd':
+			if (argc != 4)
+				usage();
+			return (do_delete(argv[3], argv[2]));
+		case 'n':
+			if (argc != 5)
+				usage();
+			return (do_rename(argv[4], argv[2], argv[3]));
+		case 's':
+			if (argc != 5)
+				usage();
+			return (do_mount(argv[3], argv[2], argv[4]));
+		case 'r':
+			if (argc != 4)
+				usage();
+			return (do_revert(argv[3], argv[2]));
+#if HAVE_OP_ROOT
+		case 'R':
+			if (argc != 4)
+				usage();
+			return (do_root(argv[3], argv[2]));
+#endif
+		default:
+			usage();
+	}
+
+	return (0);
+}
